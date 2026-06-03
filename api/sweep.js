@@ -35,7 +35,7 @@ async function fetchAIBills() {
   since.setDate(since.getDate() - 180);
   const sinceStr = since.toISOString().split('T')[0];
 
-  const url = `https://api.congress.gov/v3/bill?query=artificial+intelligence&fromDateTime=${sinceStr}T00:00:00Z&sort=updateDate+desc&limit=100&api_key=${key}`;
+  const url = `https://api.congress.gov/v3/bill?query=artificial+intelligence&fromDateTime=${sinceStr}T00:00:00Z&sort=relevance&limit=100&api_key=${key}`;
 
   let res, data;
   try {
