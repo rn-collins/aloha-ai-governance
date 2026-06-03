@@ -27,30 +27,66 @@ function isAIBill(title) {
 
 async function fetchAIBills() {
   const key = process.env.CONGRESS_API_KEY;
-  if (!key) {
-    return { bills: [], debug: 'No API key found in env' };
-  }
+  if (!key) return { bills: [], debug: 'No API key' };
+
+  // Run targeted queries for phrases that appear in AI bill TITLES
+  // Much more precise than one broad full-text search
+  const queries = [
+    'artificial intelligence act',
+    'AI accountability',
+    'deepfake',
+    'algorithmic accountability',
+    'facial recognition ban',
+    'AI safety',
+    'AI transparency',
+    'AI labeling',
+    'automated decision',
+    'foundation model',
+  ];
 
   const since = new Date();
-  since.setDate(since.getDate() - 180);
+  since.setDate(since.getDate() - 365); // 1 year window for AI legislation
   const sinceStr = since.toISOString().split('T')[0];
 
-  const url = `https://api.congress.gov/v3/bill?query=artificial+intelligence&fromDateTime=${sinceStr}T00:00:00Z&sort=relevance&limit=100&api_key=${key}`;
+  const seen = new Set();
+  const allBills = [];
 
-  let res, data;
-  try {
-    res = await fetch(url);
-    data = await res.json();
-  } catch (e) {
-    return { bills: [], debug: `Fetch error: ${e.message}` };
+  await Promise.all(queries.map(async (q) => {
+    try {
+      const encoded = encodeURIComponent(q);
+      const url = `https://api.congress.gov/v3/bill?query=${encoded}&fromDateTime=${sinceStr}T00:00:00Z&sort=relevance&limit=20&api_key=${key}`;
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.error) return;
+      for (const b of (data.bills || [])) {
+        const id = `${b.type}${b.number}-${b.congress}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        allBills.push(b);
+      }
+    } catch { /* skip failed queries */ }
+  }));
+
+  // Title filter — now much stricter since queries are already targeted
+  const AI_TITLE_TERMS = [
+    'artificial intelligence', 'machine learning', 'algorithmic',
+    'automated decision', 'generative ai', 'foundation model',
+    'large language model', 'deepfake', 'facial recognition',
+    'algorithmic accountability', 'ai liability', 'ai safety',
+    'ai governance', 'ai transparency', 'ai accountability',
+    'ai act', 'ai labeling', 'automated system accountability',
+  ];
+  const AI_ABBREVIATION = /\bai\b/i;
+
+  function isAIBill(title) {
+    if (!title) return false;
+    const lower = title.toLowerCase();
+    if (AI_ABBREVIATION.test(title)) return true;
+    return AI_TITLE_TERMS.some(t => lower.includes(t));
   }
 
-  if (!res.ok || data.error) {
-    return { bills: [], debug: `API error: ${JSON.stringify(data.error || res.status)}` };
-  }
-
-  const rawBills = data.bills || [];
-  const filtered = rawBills.filter(b => isAIBill(b.title));
+  const filtered = allBills.filter(b => isAIBill(b.title));
 
   return {
     bills: filtered.map(b => ({
@@ -65,10 +101,10 @@ async function fetchAIBills() {
       abstract: b.latestAction?.text || '',
     })),
     debug: {
-      total_returned: rawBills.length,
+      total_fetched_across_queries: allBills.length,
       passed_title_filter: filtered.length,
-      sample_raw_titles: rawBills.slice(0, 5).map(b => b.title),
       sample_filtered_titles: filtered.slice(0, 5).map(b => b.title),
+      sample_all_titles: allBills.slice(0, 5).map(b => b.title),
     }
   };
 }
