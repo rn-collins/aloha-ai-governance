@@ -6,15 +6,14 @@ const redis = new Redis({
 });
 
 // Terms that must appear in the TITLE to count as an AI bill
+// Deliberately strict — false positives are worse than false negatives for a client-facing dashboard
 const AI_TITLE_TERMS = [
   'artificial intelligence', 'machine learning', 'algorithmic',
-  'automated decision', 'generative', 'foundation model',
+  'automated decision', 'generative ai', 'foundation model',
   'large language model', 'deepfake', 'facial recognition',
-  'automated system', 'algorithmic accountability', 'ai liability',
-  'ai safety', 'ai governance', 'ai transparency', 'ai accountability',
-  'data privacy', 'surveillance', 'biometric', 'autonomous',
-  'digital rights', 'algorithmic', 'technology', 'innovation',
-  'cyber', 'computing', 'semiconductor', 'digital',
+  'algorithmic accountability', 'ai liability', 'ai safety',
+  'ai governance', 'ai transparency', 'ai accountability',
+  'ai act', 'automated system accountability',
 ];
 
 const AI_ABBREVIATION = /\bai\b/i;
