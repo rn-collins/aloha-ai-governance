@@ -5,6 +5,25 @@ const redis = new Redis({
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
+// Terms that must appear in the TITLE to count as an AI bill
+const AI_TITLE_TERMS = [
+  'artificial intelligence', 'machine learning', 'algorithmic',
+  'automated decision', 'generative ai', 'foundation model',
+  'large language model', 'ai act', 'ai accountability',
+  'ai transparency', 'ai safety', 'ai governance',
+  'deepfake', 'facial recognition', 'automated system',
+  'algorithmic accountability', 'ai liability',
+];
+
+// Broader terms OK in title if standalone (not inside other words)
+const AI_ABBREVIATION = /\bai\b/i;
+
+function isAIBill(title) {
+  const lower = (title || '').toLowerCase();
+  if (AI_ABBREVIATION.test(title)) return true;
+  return AI_TITLE_TERMS.some(t => lower.includes(t));
+}
+
 // --- Congress.gov: AI-related bills ---
 async function fetchAIBills() {
   const key = process.env.CONGRESS_API_KEY;
@@ -14,64 +33,110 @@ async function fetchAIBills() {
   since.setDate(since.getDate() - 180);
   const sinceStr = since.toISOString().split('T')[0];
 
-  const url = `https://api.congress.gov/v3/bill?query=artificial+intelligence&fromDateTime=${sinceStr}T00:00:00Z&sort=updateDate+desc&limit=50&api_key=${key}`;
+  // Fetch more results so filtering doesn't leave us empty
+  const url = `https://api.congress.gov/v3/bill?query=artificial+intelligence&fromDateTime=${sinceStr}T00:00:00Z&sort=updateDate+desc&limit=100&api_key=${key}`;
   const res = await fetch(url);
   if (!res.ok) return [];
   const data = await res.json();
 
-  return (data.bills || []).map(b => ({
-    source: 'Congress',
-    category: 'AI Legislation',
-    title: b.title || 'Untitled Bill',
-    id: `${b.type}${b.number}-${b.congress}`,
-    date: (b.latestAction?.actionDate || b.updateDate || '').slice(0, 10),
-    status: b.latestAction?.text || b.type,
-    url: b.url || `https://www.congress.gov/bill/${b.congress}th-congress/${b.type?.toLowerCase()}-bill/${b.number}`,
-    congress: b.congress,
-    abstract: b.latestAction?.text || '',
-  }));
+  return (data.bills || [])
+    .filter(b => isAIBill(b.title))
+    .map(b => ({
+      source: 'Congress',
+      category: 'AI Legislation',
+      title: b.title || 'Untitled Bill',
+      id: `${b.type}${b.number}-${b.congress}`,
+      date: (b.latestAction?.actionDate || b.updateDate || '').slice(0, 10),
+      status: b.latestAction?.text || b.type,
+      url: `https://www.congress.gov/bill/${b.congress}th-congress/${(b.type || '').toLowerCase()}-bill/${b.number}`,
+      congress: b.congress,
+      abstract: b.latestAction?.text || '',
+    }));
 }
 
-// --- FTC: AI enforcement press releases via RSS ---
+// --- FTC: AI press releases ---
 async function fetchFTCReleases() {
-  const res = await fetch('https://www.ftc.gov/feeds/press-release.xml');
-  if (!res.ok) return [];
-  const xml = await res.text();
+  // Try multiple FTC feed URLs
+  const feeds = [
+    'https://www.ftc.gov/feeds/press-release.xml',
+    'https://www.ftc.gov/feeds/news.xml',
+  ];
 
-  const AI_TERMS = ['artificial intelligence', 'ai ', ' ai,', 'machine learning',
-    'algorithm', 'automated decision', 'generative', 'chatbot', 'deepfake'];
+  const AI_TERMS = [
+    'artificial intelligence', 'machine learning', 'algorithm',
+    'automated decision', 'generative', 'chatbot', 'deepfake',
+    'ai tool', 'ai system', 'facial recognition', 'biometric',
+  ];
 
-  const items = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)];
-  const results = [];
+  for (const feedUrl of feeds) {
+    try {
+      const res = await fetch(feedUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 Aloha-AI-Monitor/1.0' }
+      });
+      if (!res.ok) continue;
+      const xml = await res.text();
+      if (!xml.includes('<item>') && !xml.includes('<entry>')) continue;
 
-  for (const [, body] of items) {
-    const title = (body.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/) ||
-                   body.match(/<title>(.*?)<\/title>/))?.[1] || '';
-    const desc = (body.match(/<description><!\[CDATA\[(.*?)\]\]><\/description>/) ||
-                  body.match(/<description>(.*?)<\/description>/))?.[1]?.replace(/<[^>]+>/g, '') || '';
-    const link = body.match(/<link>(.*?)<\/link>/)?.[1] || '';
-    const pubDate = body.match(/<pubDate>(.*?)<\/pubDate>/)?.[1] || '';
+      const results = [];
+      const since = new Date();
+      since.setDate(since.getDate() - 180);
 
-    const combined = `${title} ${desc}`.toLowerCase();
-    if (!AI_TERMS.some(t => combined.includes(t))) continue;
+      // Handle both RSS <item> and Atom <entry>
+      const itemPattern = xml.includes('<item>') 
+        ? /<item>([\s\S]*?)<\/item>/g 
+        : /<entry>([\s\S]*?)<\/entry>/g;
 
-    const d = pubDate ? new Date(pubDate) : null;
-    const since = new Date();
-    since.setDate(since.getDate() - 180);
-    if (d && d < since) continue;
+      for (const [, body] of xml.matchAll(itemPattern)) {
+        // Extract title — handle CDATA and plain
+        const title = (
+          body.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/s) ||
+          body.match(/<title[^>]*>(.*?)<\/title>/s)
+        )?.[1]?.trim() || '';
 
-    results.push({
-      source: 'FTC',
-      category: 'FTC AI Enforcement',
-      title,
-      id: link,
-      date: d ? d.toISOString().slice(0, 10) : '',
-      status: 'Press Release',
-      url: link,
-      abstract: desc.slice(0, 300),
-    });
+        // Extract description/summary
+        const desc = (
+          body.match(/<description><!\[CDATA\[([\s\S]*?)\]\]><\/description>/) ||
+          body.match(/<description[^>]*>([\s\S]*?)<\/description>/) ||
+          body.match(/<summary[^>]*>([\s\S]*?)<\/summary>/)
+        )?.[1]?.replace(/<[^>]+>/g, '').trim() || '';
+
+        // Extract link
+        const link = (
+          body.match(/<link>(.*?)<\/link>/) ||
+          body.match(/<link[^>]+href="([^"]+)"/)
+        )?.[1]?.trim() || '';
+
+        // Extract date
+        const pubDate = (
+          body.match(/<pubDate>(.*?)<\/pubDate>/) ||
+          body.match(/<published>(.*?)<\/published>/) ||
+          body.match(/<updated>(.*?)<\/updated>/)
+        )?.[1]?.trim() || '';
+
+        const combined = `${title} ${desc}`.toLowerCase();
+        if (!AI_TERMS.some(t => combined.includes(t))) continue;
+
+        const d = pubDate ? new Date(pubDate) : null;
+        if (d && d < since) continue;
+
+        results.push({
+          source: 'FTC',
+          category: 'FTC AI Enforcement',
+          title: title || 'FTC Press Release',
+          id: link || title,
+          date: d ? d.toISOString().slice(0, 10) : '',
+          status: 'Press Release',
+          url: link,
+          abstract: desc.slice(0, 300),
+        });
+      }
+
+      if (results.length > 0 || xml.length > 1000) return results;
+    } catch (e) {
+      continue;
+    }
   }
-  return results;
+  return [];
 }
 
 function parseRedisVal(val) {
@@ -106,7 +171,14 @@ export default async function handler(req, res) {
       });
     }
 
-    res.json({ ok: true, bills: bills.length, ftc: ftc.length, total: all.length, new_this_sweep: newItems.length });
+    res.json({
+      ok: true,
+      bills: bills.length,
+      ftc: ftc.length,
+      total: all.length,
+      new_this_sweep: newItems.length,
+      sample_titles: all.slice(0, 3).map(d => d.title),
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ ok: false, error: err.message });
