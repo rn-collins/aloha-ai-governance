@@ -15,7 +15,7 @@ const EXA_SEARCHES = [
 
 async function fetchExa() {
   const key = process.env.EXA_API_KEY;
-  if (!key) return { items: [], debug: 'No EXA_API_KEY found' };
+  if (!key) throw new Error('EXA_API_KEY is not configured');
 
   const since = new Date();
   since.setDate(since.getDate() - 180);
@@ -23,6 +23,7 @@ async function fetchExa() {
 
   const seen = new Set();
   const allItems = [];
+  const failed = [];
 
   await Promise.all(EXA_SEARCHES.map(async ({ query, category }) => {
     try {
@@ -41,7 +42,7 @@ async function fetchExa() {
         }),
       });
 
-      if (!res.ok) return;
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
 
       for (const r of (data.results || [])) {
@@ -58,16 +59,23 @@ async function fetchExa() {
           abstract: (r.text || r.snippet || '').slice(0, 300),
         });
       }
-    } catch { /* skip failed searches */ }
+    } catch (error) {
+      failed.push({ category, message: error.message });
+    }
   }));
 
   // Sort by date descending
   allItems.sort((a, b) => b.date.localeCompare(a.date));
 
+  if (failed.length === EXA_SEARCHES.length) throw new Error('Every discovery search failed');
+  if (allItems.length === 0) throw new Error('Discovery returned zero records; previous dataset retained');
+
   return {
     items: allItems,
+    failed,
     debug: {
       total: allItems.length,
+      failed_searches: failed,
       by_category: EXA_SEARCHES.reduce((acc, { category }) => {
         acc[category] = allItems.filter(i => i.category === category).length;
         return acc;
@@ -85,6 +93,19 @@ function parseRedisVal(val) {
 }
 
 export default async function handler(req, res) {
+  // Writes must not be triggerable by anonymous callers. Vercel strips inbound
+  // x-vercel-* headers and sets x-vercel-cron on its own scheduled invocations,
+  // so the cron keeps working whether or not CRON_SECRET has been configured.
+  const secret = process.env.CRON_SECRET;
+  const fromCron = Boolean(req.headers['x-vercel-cron']);
+  const authorised = fromCron || (secret && req.headers.authorization === `Bearer ${secret}`);
+  if (!authorised) {
+    return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  }
+
+  const attemptedAt = new Date().toISOString();
+  await redis.set('ai_gov:last_attempt', attemptedAt);
+
   try {
     const result = await fetchExa();
     const items = result.items;
@@ -99,7 +120,9 @@ export default async function handler(req, res) {
     }
 
     await redis.set('ai_gov:documents', items);
-    await redis.set('ai_gov:last_sweep', new Date().toISOString());
+    await redis.set('ai_gov:last_sweep', attemptedAt);
+    await redis.set('ai_gov:last_error', '');
+    await redis.set('ai_gov:failed_searches', result.failed.length);
     await redis.set('ai_gov:bill_count', items.filter(i => i.category === 'AI Legislation').length);
     await redis.set('ai_gov:ftc_count', items.filter(i => i.category === 'FTC AI Enforcement').length);
 
@@ -118,10 +141,19 @@ export default async function handler(req, res) {
       ok: true,
       total: items.length,
       new_this_sweep: newItems.length,
+      failed_searches: result.failed.length,
       categories,
       debug: result.debug,
     });
   } catch (err) {
-    res.status(500).json({ ok: false, error: err.message });
+    // Never overwrite a good dataset with a failed run, and never stamp a fresh
+    // last_sweep date for work that did not happen.
+    await redis.set('ai_gov:last_error', err.message);
+    res.status(503).json({
+      ok: false,
+      error: 'Source refresh failed; the previously collected dataset was retained.',
+      detail: err.message,
+      attempted_at: attemptedAt,
+    });
   }
 }
