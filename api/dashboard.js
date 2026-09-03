@@ -20,7 +20,7 @@ export default function handler(req, res) {
 /* AI Governance Tracker — a sweep log, not a product dashboard.
 
    What shipped before was the estate's default signature: Cormorant Garamond /
-   Syne / Manrope / DM Mono on #F6F3EC cream with rounded white cards and pill
+   Syne / Manrope / DM Mono on F6F3EC cream with rounded white cards and pill
    filters — the same four faces declared by aloha-legal-ai-monitor and by
    set-for-life, which is not even an Aloha property.
 
